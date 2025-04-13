@@ -29,8 +29,9 @@ function generateTaskId(): string {
 }
 
 // --- Argument Parsing ---
-// All arguments passed to this script are considered the command to run the server
-const serverCommand = process.argv.slice(2); // Get all args after node executable and script path
+// Find the '--' separator to get the actual server command arguments
+const separatorIndex = process.argv.indexOf('--');
+const serverCommand = separatorIndex !== -1 ? process.argv.slice(separatorIndex + 1) : process.argv.slice(2); // Fallback if -- not found
 if (serverCommand.length === 0) {
     console.error(colorize('red', 'Error: No server command provided.'));
     console.error(colorize('red', 'Usage: npm run a2a:stdio-cli -- <server_command...>'));

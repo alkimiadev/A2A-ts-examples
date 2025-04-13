@@ -1,8 +1,8 @@
 # A2A Client (JS)
 
-This directory contains a TypeScript client implementation for the Agent-to-Agent (A2A) communication protocol.
+This directory contains TypeScript client implementations for the Agent-to-Agent (A2A) communication protocol, supporting both HTTP and stdio transports.
 
-## `client.ts`
+## HTTP Client (`client.ts`)
 
 This file defines the `A2AClient` class, which provides methods for interacting with an A2A server over HTTP using JSON-RPC.
 
@@ -110,4 +110,102 @@ async function streamTask() {
 streamTask();
 ```
 
-This client is designed to work with servers implementing the A2A protocol specification.
+This HTTP client is designed to work with servers implementing the A2A protocol specification over HTTP.
+
+---
+
+## Stdio Transport (`stdio_transport.ts`)
+
+This file defines the `StdioTransport` class.
+
+### Purpose
+
+-   Manages the lifecycle (starting, stopping) of an A2A agent running as a separate child process.
+-   Handles the low-level exchange of newline-delimited JSON-RPC messages over the child process's standard input (stdin) and standard output (stdout).
+-   Listens to the child process's standard error (stderr) for logging output from the agent.
+-   It is primarily intended for internal use by the `A2AStdioClient`.
+
+---
+
+## Stdio Client (`stdio_client.ts`)
+
+This file defines the `A2AStdioClient` class.
+
+### Purpose
+
+-   Provides a high-level client interface for interacting with A2A agents that run as local child processes, communicating via stdio.
+-   Uses `StdioTransport` internally to manage the process and communication.
+
+### Key Features
+
+-   **Process Management:** Takes a command array (`serverCommand`) during instantiation to specify how to launch the agent process. Can also take a working directory (`cwd`) option.
+-   **A2A Methods:** Implements the *same* standard A2A method interface as the HTTP `A2AClient` (`sendTask`, `sendTaskSubscribe`, `getTask`, `cancelTask`, etc.). This allows client-side code to potentially interact with both HTTP and stdio agents using a similar pattern.
+-   **Direct Communication:** Interacts directly with the agent process via stdin/stdout, bypassing HTTP.
+
+### Differences from HTTP Client
+
+-   **No HTTP:** Does not use HTTP requests or listen on ports.
+-   **No Discovery:** Does not support agent discovery via URLs or `.well-known/agent.json`. The client must know the exact command to run the agent.
+-   **Instantiation:** Requires a `serverCommand` array instead of a server URL.
+
+### Basic Usage
+
+```typescript
+import { A2AStdioClient, Task, TaskQueryParams, TaskSendParams } from "./stdio_client"; // Import from stdio_client
+import * as schema from '../schema'; // Import schema for types
+import { v4 as uuidv4 } from "uuid";
+
+// 1. Define the command to run the agent server
+const serverCommand = [
+  'npx',
+  'tsx',
+  'src/agents/movie-agent/index.ts', // Path to the agent's entry point
+  '--transport=stdio' // Argument telling the agent to use stdio mode
+];
+
+// 2. Instantiate the client
+// The cwd might be needed depending on how the CLI/agent is structured
+const client = new A2AStdioClient(serverCommand, { cwd: '.' });
+
+async function runStdio() {
+  const taskId = uuidv4();
+  try {
+    console.log(`--- Starting stdio task ${taskId} ---`);
+    // 3. Send a task (using the same method signature as HTTP client)
+    const sendParams: schema.TaskSendParams = {
+      id: taskId,
+      message: { role: "user", parts: [{ text: "Tell me about the movie Inception" }] },
+    };
+
+    // Use sendTaskSubscribe for streaming interaction
+    const stream = client.sendTaskSubscribe(sendParams);
+
+    for await (const event of stream) {
+      if ("status" in event) {
+        const statusEvent = event as schema.TaskStatusUpdateEvent;
+        console.log(
+          `[${taskId}] Status: ${statusEvent.status.state} - ${
+            statusEvent.status.message?.parts[0]?.text ?? "(no message)"
+          }`
+        );
+        if (statusEvent.final) break;
+      } else if ("artifact" in event) {
+        const artifactEvent = event as schema.TaskArtifactUpdateEvent;
+        console.log(`[${taskId}] Artifact: ${artifactEvent.artifact.name ?? "unnamed"}`);
+        // Process artifact parts
+      }
+    }
+    console.log(`--- Stdio task ${taskId} finished ---`);
+
+  } catch (error) {
+    console.error(`A2A Stdio Client Error (Task ${taskId}):`, error);
+  } finally {
+    // 4. Close the client (stops the transport and kills the agent process)
+    client.close();
+  }
+}
+
+runStdio();
+```
+
+This client enables interaction with locally running A2A agents without requiring network setup, suitable for CLI tools or local orchestration.

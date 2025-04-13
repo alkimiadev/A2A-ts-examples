@@ -1,5 +1,9 @@
 import { StdioTransport } from './stdio_transport.js';
+import logger from '../logger.js'; // Import the shared logger
 import * as schema from '../schema.js';
+
+// Create a child logger specific to this component
+const clientLogger = logger.child({ component: 'A2AStdioClient' });
 
 /**
  * A client implementation for the A2A protocol that communicates
@@ -18,7 +22,7 @@ export class A2AStdioClient {
     this.transport = new StdioTransport(serverCommand, options); // Pass options to transport
     // Start the transport immediately but allow awaiting its completion
     this.startPromise = this.transport.start().catch(err => {
-        console.error("[A2AStdioClient] Transport failed to start:", err);
+        clientLogger.error({ error: err instanceof Error ? err.message : String(err), stack: err instanceof Error ? err.stack : undefined }, "Transport failed to start");
         // Propagate the error so users awaiting start know it failed
         throw err;
     });

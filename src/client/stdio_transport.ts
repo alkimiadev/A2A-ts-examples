@@ -1,6 +1,10 @@
 import * as child_process from 'node:child_process';
 import * as readline from 'node:readline';
+import logger from '../logger.js'; // Import the shared logger
 import * as schema from '../schema.js'; // Import all schema types under the 'schema' namespace
+
+// Create a child logger specific to this component
+const transportLogger = logger.child({ component: 'StdioTransport' });
 
 // Type for pending requests map
 type PendingRequest = {
@@ -35,7 +39,7 @@ export class StdioTransport {
     // Ensure command and args are split correctly
     this.serverCommand = [...serverCommand];
     this.cwd = options?.cwd;
-    console.error(`[StdioTransport] Initialized with command: ${this.serverCommand.join(' ')} ${this.cwd ? `(cwd: ${this.cwd})` : ''}`);
+    transportLogger.info({ command: this.serverCommand, cwd: this.cwd }, `Initialized`);
   }
 
   /**
@@ -45,12 +49,12 @@ export class StdioTransport {
   async start(): Promise<void> {
     return new Promise((resolve, reject) => {
       if (this.serverProcess) {
-        console.warn("[StdioTransport] Server process already started.");
+        transportLogger.warn("Start called but server process already exists.");
         resolve();
         return;
       }
 
-      console.error(`[StdioTransport] Starting server process: ${this.serverCommand.join(' ')}`);
+      transportLogger.info({ command: this.serverCommand, cwd: this.cwd }, `Starting server process`);
       const command = this.serverCommand[0];
       const args = this.serverCommand.slice(1);
 
@@ -62,13 +66,13 @@ export class StdioTransport {
 
       // --- Error Handling ---
       this.serverProcess.on('error', (err) => {
-        console.error('[StdioTransport] Failed to start server process:', err);
+        transportLogger.error({ error: err.message, stack: err.stack }, 'Failed to start server process');
         this.serverProcess = null;
         reject(new Error(`Failed to spawn server process: ${err.message}`));
       });
 
       this.serverProcess.on('exit', (code, signal) => {
-        console.error(`[StdioTransport] Server process exited with code ${code}, signal ${signal}`);
+        transportLogger.warn({ code, signal }, `Server process exited`);
         this.cleanup(); // Clean up resources on exit
         // Optionally reject pending requests/streams?
         this.rejectAllPending(`Server process exited unexpectedly (code: ${code}, signal: ${signal})`);
@@ -76,7 +80,7 @@ export class StdioTransport {
 
       // --- Stderr Handling ---
       this.serverProcess.stderr?.on('data', (data) => {
-        console.error(`[StdioTransport Server STDERR] ${data.toString().trim()}`);
+        transportLogger.debug({ stream: 'stderr', data: data.toString().trim() }, `Server STDERR data`);
         // Check stderr for early indication of readiness or failure if needed
         // e.g., if server prints "Ready" or specific error messages
       });
@@ -97,13 +101,13 @@ export class StdioTransport {
       });
 
       this.rl.on('close', () => {
-          console.error("[StdioTransport] Server stdout stream closed.");
+          transportLogger.info("Server stdout stream closed.");
           // This might happen normally on exit, or indicate an issue
       });
 
       // Assume started once the process is spawned and streams are attached
       // More robust check could wait for a specific message on stderr/stdout
-      console.error("[StdioTransport] Server process spawned.");
+      transportLogger.info("Server process spawned and streams attached.");
       resolve();
     });
   }
@@ -112,7 +116,7 @@ export class StdioTransport {
    * Stops the A2A agent server process.
    */
   stop(): void {
-    console.error("[StdioTransport] Stopping server process...");
+    transportLogger.info("Stopping server process...");
     if (this.serverProcess) {
       this.serverProcess.kill(); // Send SIGTERM
     }
@@ -124,7 +128,7 @@ export class StdioTransport {
    * Cleans up resources like listeners and process handles.
    */
   private cleanup(): void {
-    console.error("[StdioTransport] Cleaning up resources.");
+    transportLogger.info("Cleaning up resources.");
     this.rl?.close();
     this.rl = null;
     this.serverProcess?.removeAllListeners();
@@ -139,7 +143,7 @@ export class StdioTransport {
    */
   private rejectAllPending(reasonMessage: string): void {
     const error = new Error(reasonMessage);
-    console.error(`[StdioTransport] Rejecting all pending requests/streams: ${reasonMessage}`);
+    transportLogger.warn({ reason: reasonMessage }, `Rejecting all pending requests/streams`);
     this.pendingRequests.forEach((req) => {
       req.reject(error);
     });
@@ -149,7 +153,7 @@ export class StdioTransport {
         try {
             stream.controller.error(error); // Signal error to the stream consumer
         } catch (e) {
-            console.error("[StdioTransport] Error closing stream controller:", e);
+            transportLogger.error({ error: e instanceof Error ? e.message : String(e) }, "Error closing stream controller during rejection");
         }
     });
     this.activeStreams.clear();
@@ -161,7 +165,7 @@ export class StdioTransport {
    * Parses JSON and routes to appropriate handler (request response or stream event).
    */
   private _handleStdoutLine(line: string): void {
-    console.error(`[StdioTransport Server STDOUT] ${line}`);
+    transportLogger.debug({ stream: 'stdout', data: line }, `Received line`);
     try {
       const message = JSON.parse(line);
 
@@ -172,15 +176,15 @@ export class StdioTransport {
         if (pending) {
           this.pendingRequests.delete(response.id); // Remove before resolving/rejecting
           if (response.error) {
-            console.error(`[StdioTransport] Received error response for ID ${response.id}:`, response.error);
+            transportLogger.error({ reqId: response.id, errorCode: response.error.code, errorMessage: response.error.message, errorData: response.error.data }, `Received error response`);
             pending.reject(new Error(`RPC Error ${response.error.code}: ${response.error.message}`)); // Create a proper error object
           } else {
-            console.error(`[StdioTransport] Received success response for ID ${response.id}`);
+            transportLogger.debug({ reqId: response.id }, `Received success response`);
             pending.resolve(response.result);
           }
         } else {
           // Might be a response for a stream request's initial setup, or unsolicited
-          console.warn(`[StdioTransport] Received response for unknown or non-pending request ID: ${response.id}`);
+          transportLogger.warn({ reqId: response.id }, `Received response for unknown or non-pending request ID`);
         }
       }
       // Check if it's a streaming event (has 'id' which is the TASK_ID, and 'status' or 'artifact')
@@ -198,7 +202,7 @@ export class StdioTransport {
                  // Heuristic: If the stream method was sendSubscribe/resubscribe,
                  // assume this first event belongs to it and update the map key.
                  if (activeStream.method === 'tasks/sendSubscribe' || activeStream.method === 'tasks/resubscribe') {
-                     console.error(`[StdioTransport] Associating Task ID ${taskId} with original Request ID ${reqId}`);
+                     transportLogger.debug({ taskId, reqId }, `Associating Task ID with original Request ID for stream`);
                      // Re-key the map entry from Request ID to Task ID
                      this.activeStreams.set(taskId, activeStream);
                      this.activeStreams.delete(reqId);
@@ -209,24 +213,25 @@ export class StdioTransport {
          }
 
          if (stream) {
-            console.error(`[StdioTransport] Received stream event for Task ID ${taskId}`);
+            const eventType = 'status' in streamEvent ? 'status' : 'artifact';
+            transportLogger.debug({ taskId, eventType }, `Received stream event`);
             stream.controller.enqueue(streamEvent); // Pass the event to the stream consumer
             // Check if the event signals the end of the stream
             if (streamEvent.final) {
-                console.error(`[StdioTransport] Stream for Task ID ${taskId} marked as final.`);
+                transportLogger.debug({ taskId }, `Stream marked as final, closing controller`);
                 stream.controller.close();
                 this.activeStreams.delete(taskId); // Delete by Task ID
             }
          } else {
              // Still couldn't find a matching stream
-             console.warn(`[StdioTransport] Received stream event for unknown or inactive Task ID: ${taskId}`);
+             transportLogger.warn({ taskId }, `Received stream event for unknown or inactive Task ID`);
          }
       }
       else {
-        console.warn(`[StdioTransport] Received non-JSONRPC/non-event message: ${line}`);
+        transportLogger.warn({ data: line }, `Received non-JSONRPC/non-event message`);
       }
     } catch (e) {
-      console.error(`[StdioTransport] Failed to parse or handle stdout line: ${line}`, e);
+      transportLogger.error({ data: line, error: e instanceof Error ? e.message : String(e), stack: e instanceof Error ? e.stack : undefined }, `Failed to parse or handle stdout line`);
     }
   }
 
@@ -264,10 +269,10 @@ export class StdioTransport {
 
     try {
       const requestString = JSON.stringify(request);
-      console.error(`[StdioTransport] Sending request (ID: ${requestId}): ${requestString}`);
+      transportLogger.debug({ reqId: requestId, method: method, params: params }, `Sending request`);
       this.serverProcess.stdin.write(requestString + '\n', (err) => {
           if (err) {
-              console.error(`[StdioTransport] Error writing to stdin for request ${requestId}:`, err);
+              transportLogger.error({ reqId: requestId, error: err.message, stack: err.stack }, `Error writing request to stdin`);
               if (this.pendingRequests.has(requestId)) {
                   this.pendingRequests.get(requestId)!.reject(new Error(`Failed to write request to server stdin: ${err.message}`));
                   this.pendingRequests.delete(requestId);
@@ -275,7 +280,7 @@ export class StdioTransport {
           }
       });
     } catch (e) {
-        console.error(`[StdioTransport] Error stringifying request ${requestId}:`, e);
+        transportLogger.error({ reqId: requestId, error: e instanceof Error ? e.message : String(e), stack: e instanceof Error ? e.stack : undefined }, `Error stringifying request`);
         this.pendingRequests.get(requestId)!.reject(new Error(`Failed to stringify request: ${e instanceof Error ? e.message : String(e)}`));
         this.pendingRequests.delete(requestId); // Clean up if stringify/write fails
         // Re-throw the error to signal immediate failure
@@ -316,10 +321,10 @@ export class StdioTransport {
             this.activeStreams.set(requestId, { controller: controller as ReadableStreamDefaultController<any>, method });
             try {
                 const requestString = JSON.stringify(request);
-                console.error(`[StdioTransport] Sending stream request (ID: ${requestId}): ${requestString}`);
+                transportLogger.debug({ reqId: requestId, method: method, params: params }, `Sending stream request`);
                 this.serverProcess!.stdin!.write(requestString + '\n', (err) => {
                     if (err) {
-                        console.error(`[StdioTransport] Error writing to stdin for stream request ${requestId}:`, err);
+                        transportLogger.error({ reqId: requestId, error: err.message, stack: err.stack }, `Error writing stream request to stdin`);
                         if (this.activeStreams.has(requestId)) {
                             this.activeStreams.get(requestId)!.controller.error(new Error(`Failed to write stream request to server stdin: ${err.message}`));
                             this.activeStreams.delete(requestId);
@@ -327,14 +332,14 @@ export class StdioTransport {
                     }
                 });
             } catch (e) {
-                console.error(`[StdioTransport] Error stringifying stream request ${requestId}:`, e);
+                transportLogger.error({ reqId: requestId, error: e instanceof Error ? e.message : String(e), stack: e instanceof Error ? e.stack : undefined }, `Error stringifying stream request`);
                 // Error occurred before write, reject immediately
                 controller.error(new Error(`Failed to stringify stream request: ${e instanceof Error ? e.message : String(e)}`));
                 this.activeStreams.delete(requestId); // Clean up
             }
         },
         cancel: (reason) => {
-            console.error(`[StdioTransport] Stream ${requestId} cancelled by consumer. Reason:`, reason);
+            transportLogger.info({ reqId: requestId, reason }, `Stream cancelled by consumer`);
             // Optional: Send a tasks/cancel request to the server if the stream was cancelled?
             // This might require knowing the task ID associated with the stream request ID.
             // Example: this.request('tasks/cancel', { id: params.id }).catch(e => console.error("Failed to send cancel", e));

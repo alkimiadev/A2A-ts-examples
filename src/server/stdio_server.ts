@@ -1,4 +1,5 @@
 import readline from 'node:readline';
+import logger from '../logger.js'; // Import the shared logger
 import * as schema from '../schema.js';
 import {
   JSONRPCRequest,
@@ -30,6 +31,9 @@ import {
   isArtifactUpdate,
 } from './utils.js';
 
+// Create a child logger specific to this component
+const serverLogger = logger.child({ component: 'A2AStdioServer' });
+
 /**
  * Options for configuring the A2AStdioServer.
  */
@@ -50,7 +54,7 @@ export class A2AStdioServer {
   constructor(handler: TaskHandler, options: A2AStdioServerOptions = {}) { // Added options type
     this.taskHandler = handler;
     this.taskStore = options.taskStore ?? new InMemoryTaskStore();
-    console.error("[A2AStdioServer] Initialized.");
+    serverLogger.info("Initialized.");
   }
 
   /**
@@ -58,10 +62,10 @@ export class A2AStdioServer {
    */
   start(): void {
     if (this.rl) {
-      console.error("[A2AStdioServer] Server already started.");
+      serverLogger.warn("Start called but server is already running.");
       return; // Added return statement
     }
-    console.error("[A2AStdioServer] Starting...");
+    serverLogger.info("Starting...");
 
     this.rl = readline.createInterface({
       input: process.stdin,
@@ -73,33 +77,33 @@ export class A2AStdioServer {
         // Use a non-blocking wrapper to allow processing multiple lines if they arrive quickly
         this._processLine(line).catch((err: any) => { // Added type annotation for err
             // Catch unexpected errors during line processing itself
-            console.error("[A2AStdioServer] Uncaught error processing line:", err);
+            serverLogger.error({ error: err instanceof Error ? err.message : String(err), stack: err instanceof Error ? err.stack : undefined }, "Uncaught error processing line");
             // Attempt to send a generic internal error response if possible
             try {
                 const errorResponse = this._normalizeError(err, null); // No request ID available here
                 this._writeResponse(errorResponse);
             } catch (writeErr) {
-                console.error("[A2AStdioServer] FATAL: Failed to write error response after line processing error:", writeErr);
+                serverLogger.fatal({ error: writeErr instanceof Error ? writeErr.message : String(writeErr) }, "Failed to write error response after line processing error");
             }
         });
     });
 
     this.rl.on('close', () => {
-      console.error("[A2AStdioServer] Stdin stream closed. Exiting.");
+      serverLogger.info("Stdin stream closed. Exiting.");
       process.exit(0);
     });
 
     // Keep the process running until stdin is closed
     process.stdin.resume();
 
-    console.error("[A2AStdioServer] Ready and listening on stdin.");
+    serverLogger.info("Ready and listening on stdin.");
   }
 
   /**
    * Processes a single line received from stdin.
    */
   private async _processLine(line: string): Promise<void> {
-    console.error(`[A2AStdioServer] Received line: ${line}`);
+    serverLogger.debug({ data: line }, `Received line`);
     let request: JSONRPCRequest | null = null;
     try {
       request = JSON.parse(line) as JSONRPCRequest;
@@ -109,12 +113,12 @@ export class A2AStdioServer {
         throw A2AError.invalidRequest("Invalid JSON-RPC request structure.");
       }
 
-      // console.error(`[A2AStdioServer] Parsed request (ID: ${request.id}, Method: ${request.method})`); // Keep stderr clean
+      serverLogger.debug({ reqId: request.id, method: request.method }, `Parsed request`);
 
       await this._routeRequest(request);
 
     } catch (error: any) {
-      console.error(`[A2AStdioServer] Error processing line: ${error.message}`);
+      // Error logging is handled within _normalizeError
       // Use the normalizeError helper function
       const errorResponse = this._normalizeError(error, request?.id ?? null, request?.params?.['id']);
       this._writeResponse(errorResponse);
@@ -180,7 +184,7 @@ export class A2AStdioServer {
       try {
         await this.taskStore.save(currentData);
       } catch (saveError) {
-        console.error( `[A2AStdioServer ERROR] Failed to save task ${taskId} after handler error:`, saveError );
+        serverLogger.error({ taskId, error: saveError instanceof Error ? saveError.message : String(saveError), stack: saveError instanceof Error ? saveError.stack : undefined }, `Failed to save task after handler error`);
       }
       // Rethrow normalized error, which will be caught by _processLine
       throw this._normalizeError(handlerError, req.id, taskId).error; // Throw the inner error object
@@ -222,14 +226,14 @@ export class A2AStdioServer {
           const terminalStates: TaskState[] = [ "completed", "failed", "canceled", "input-required" ];
           isFinal = terminalStates.includes(currentData.task.status.state);
           event = this._createTaskStatusEvent( taskId, currentData.task.status, isFinal );
-          // if (isFinal) console.error(`[A2AStdioServer ${taskId}] Yielded terminal state ${currentData.task.status.state}, marking event as final.`);
+          if (isFinal) serverLogger.debug({ taskId, state: currentData.task.status.state }, `Yielded terminal state, marking event as final.`);
         } else if (isArtifactUpdate(yieldValue)) {
           const updatedArtifact = currentData.task.artifacts?.find(
               (a) => (a.index !== undefined && a.index === yieldValue.index) || (a.name && a.name === yieldValue.name)
             ) ?? yieldValue;
           event = this._createTaskArtifactEvent(taskId, updatedArtifact, false);
         } else {
-          console.error("[A2AStdioServer WARN] Handler yielded unknown value:", yieldValue);
+          serverLogger.warn({ taskId, yieldValue }, "Handler yielded unknown value type");
           continue;
         }
 
@@ -241,10 +245,10 @@ export class A2AStdioServer {
       }
 
       if (!lastEventWasFinal && !context.isCancelled()) { // Also check for cancellation
-        // console.error(`[A2AStdioServer ${taskId}] Handler finished without yielding terminal state. Sending final state: ${currentData.task.status.state}`);
+        serverLogger.debug({ taskId, state: currentData.task.status.state }, `Handler finished without yielding terminal state. Sending final state.`);
         const finalStates: TaskState[] = ["completed", "failed", "canceled", "input-required"];
         if (!finalStates.includes(currentData.task.status.state)) {
-          console.error(`[A2AStdioServer WARN ${taskId}] Task ended non-terminally (${currentData.task.status.state}). Forcing 'completed'.`);
+          serverLogger.warn({ taskId, state: currentData.task.status.state }, `Task ended non-terminally. Forcing 'completed'.`);
           currentData = this._applyUpdateToTaskAndHistory(currentData, { state: "completed" });
           await this.taskStore.save(currentData);
         }
@@ -252,7 +256,7 @@ export class A2AStdioServer {
         this._writeResponse(finalEvent); // Send final event
       }
     } catch (handlerError) {
-      console.error(`[A2AStdioServer ERROR ${taskId}] Handler error during streaming:`, handlerError);
+      serverLogger.error({ taskId, error: handlerError instanceof Error ? handlerError.message : String(handlerError), stack: handlerError instanceof Error ? handlerError.stack : undefined }, `Handler error during streaming`);
       const failureUpdate: Omit<TaskStatus, "timestamp"> = {
         state: "failed",
         message: { role: "agent", parts: [{ text: `Handler failed: ${handlerError instanceof Error ? handlerError.message : String(handlerError)}` }] },
@@ -261,7 +265,7 @@ export class A2AStdioServer {
       try {
         await this.taskStore.save(currentData);
       } catch (saveError) {
-        console.error(`[A2AStdioServer ERROR ${taskId}] Failed to save task after handler error:`, saveError);
+        serverLogger.error({ taskId, error: saveError instanceof Error ? saveError.message : String(saveError), stack: saveError instanceof Error ? saveError.stack : undefined }, `Failed to save task after handler error during streaming`);
       }
       const errorEvent = this._createTaskStatusEvent( taskId, currentData.task.status, true );
       this._writeResponse(errorEvent); // Send final error event
@@ -293,7 +297,7 @@ export class A2AStdioServer {
 
     const finalStates: TaskState[] = ["completed", "failed", "canceled"];
     if (finalStates.includes(data.task.status.state)) {
-      console.error(`[A2AStdioServer WARN] Task ${taskId} already in final state ${data.task.status.state}, cannot cancel.`);
+      serverLogger.warn({ taskId, state: data.task.status.state }, `Attempted to cancel task already in final state.`);
       this._writeResponse(this._createSuccessResponse(req.id, data.task));
       return;
     }
@@ -378,20 +382,20 @@ export class A2AStdioServer {
       };
       data = { task: initialTask, history: [initialMessage] };
       needsSave = true;
-      // console.error(`[A2AStdioServer Task ${taskId}] Created new task and history.`); // Keep stderr clean
+      serverLogger.debug({ taskId }, `Created new task and history.`);
     } else {
-      // console.error(`[A2AStdioServer Task ${taskId}] Loaded existing task and history.`); // Keep stderr clean
+      serverLogger.debug({ taskId }, `Loaded existing task and history.`);
       data = { task: data.task, history: [...data.history, initialMessage] };
       needsSave = true;
       const finalStates: TaskState[] = ["completed", "failed", "canceled"];
       if (finalStates.includes(data.task.status.state)) {
-        console.error(`[A2AStdioServer WARN Task ${taskId}] Received message for task in final state ${data.task.status.state}. Resetting to 'submitted'.`);
+        serverLogger.warn({ taskId, state: data.task.status.state }, `Received message for task in final state. Resetting to 'submitted'.`);
         data = this._applyUpdateToTaskAndHistory(data, { state: "submitted", message: null });
       } else if (data.task.status.state === "input-required") {
-        // console.error(`[A2AStdioServer Task ${taskId}] Received message while 'input-required', changing state to 'working'.`); // Keep stderr clean
+        serverLogger.debug({ taskId }, `Received message while 'input-required', changing state to 'working'.`);
         data = this._applyUpdateToTaskAndHistory(data, { state: "working" });
       } else if (data.task.status.state === "working") {
-        console.error(`[A2AStdioServer WARN Task ${taskId}] Received message while already 'working'. Proceeding.`);
+        serverLogger.warn({ taskId }, `Received message while already 'working'. Proceeding.`);
       }
     }
     if (needsSave) await this.taskStore.save(data);
@@ -428,7 +432,7 @@ export class A2AStdioServer {
     else if (error instanceof Error) a2aError = A2AError.internalError(error.message, { stack: error.stack });
     else a2aError = A2AError.internalError("An unknown error occurred.", error);
     if (taskId && !a2aError.taskId) a2aError.taskId = taskId;
-    console.error(`[A2AStdioServer ERROR] Processing request (Task: ${a2aError.taskId ?? "N/A"}, ReqID: ${reqId ?? "N/A"}):`, a2aError.message, a2aError.data ?? ''); // Log message and data
+    serverLogger.error({ taskId: a2aError.taskId, reqId, errorCode: a2aError.code, errorMessage: a2aError.message, errorData: a2aError.data, stack: a2aError.stack }, `Error processing request`);
     return this._createErrorResponse(reqId, a2aError.toJSONRPCError());
   }
 
@@ -445,9 +449,9 @@ export class A2AStdioServer {
     try {
       const responseString = JSON.stringify(response);
       process.stdout.write(responseString + '\n');
-      // console.error(`[A2AStdioServer] Sent response/event: ${responseString}`); // Keep stderr clean
+      serverLogger.debug({ response: response }, `Sent response/event`); // Log the object directly for structured logging
     } catch (stringifyError: any) {
-        console.error(`[A2AStdioServer FATAL] Failed to stringify response: ${stringifyError.message}`);
+        serverLogger.fatal({ error: stringifyError.message, stack: stringifyError.stack }, "Failed to stringify response");
     }
   }
 }

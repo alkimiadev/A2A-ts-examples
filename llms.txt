@@ -1,0 +1,153 @@
+# A2A (Agent2Agent) Protocol High-Level Summary (As Implemented in this Repository)
+
+This project demonstrates the **Agent2Agent (A2A) protocol**, an open standard initiated by Google designed to enable communication and interoperability between disparate AI agent systems. The core goal is to allow agents built on different frameworks or by different vendors to discover each other's capabilities, negotiate interaction modes, and collaborate on tasks.
+
+This repository provides:
+
+1.  **TypeScript Implementations:** Reusable JavaScript/TypeScript (`src/`) code for building A2A clients and servers using both standard HTTP (conceptual) and a local **stdio** transport mechanism. This includes:
+    *   `src/client/client.ts`: HTTP client (conceptual).
+    *   `src/client/stdio_client.ts`: Client for stdio communication.
+    *   `src/client/stdio_transport.ts`: Manages stdio process communication.
+    *   `src/server/server.ts`: HTTP server (conceptual).
+    *   `src/server/stdio_server.ts`: Server for stdio communication.
+    *   `src/server/store.ts`, `src/server/handler.ts`, `src/server/error.ts`, `src/server/utils.ts`: Supporting server components.
+    *   `src/schema.ts`: TypeScript interfaces matching the A2A JSON schema.
+2.  **Example Agents:** Demonstrations of integrating A2A into the Genkit framework (`src/agents/`):
+    *   **Movie Agent:** Uses TMDB API via Genkit tools.
+    *   **Coder Agent:** Generates code files as artifacts.
+3.  **Example Host:** An application that *consumes* A2A services via stdio:
+    *   **Stdio CLI (`src/stdio-cli.ts`):** Command-line client for direct interaction with agents running via stdio.
+
+Key features of the A2A protocol demonstrated in this repository include: standardized task management (`tasks/send`, `tasks/get`, `tasks/cancel`), support for different content types (`Parts`, `Artifacts`), and streaming updates for long-running tasks over stdio.
+
+---
+
+# A2A (Agent2Agent) Protocol Details
+
+## 1. Overview
+
+*   **Project Name:** Agent2Agent (A2A) Protocol
+*   **Purpose:** An open protocol by Google enabling communication and interoperability between AI agents.
+*   **Core Goal:** Allow agents to discover capabilities, negotiate interaction, and collaborate securely on tasks.
+*   **Communication:** Uses JSON-RPC 2.0. This repository demonstrates communication over:
+    *   **Stdio:** Newline-delimited JSON messages exchanged via standard input/output of a child process.
+    *   **HTTP(S):** Standard request/response and Server-Sent Events (SSE) for streaming (conceptual client/server provided).
+*   **Key Components in this Repository:** TypeScript Libraries (HTTP & Stdio Client/Server), Sample Agents (Genkit), Stdio CLI Host.
+
+## 2. Protocol Specification (Summary)
+
+*(This section describes the general A2A protocol specification, which the code implements.)*
+
+### 2.1. Core JSON-RPC Structures
+
+*   **`JSONRPCMessage`:** Base for requests/responses (`jsonrpc: "2.0"`).
+*   **`JSONRPCRequest`:** Contains `method`, `params`, `id`.
+*   **`JSONRPCResponse`:** Contains `result` or `error`, `id`.
+*   **`JSONRPCError`:** Contains `code`, `message`, optional `data`.
+
+### 2.2. Key A2A Data Objects
+
+*   **`AgentCard`:** Metadata describing an agent.
+    *   *Note:* Typically found at `/.well-known/agent.json` for HTTP discovery, which is **not used** in the stdio transport flow. Stdio requires the client to know how to execute the agent.
+*   **`AgentCapabilities`:** Flags for features like `streaming`, `pushNotifications`.
+*   **`AgentSkill`:** Describes specific agent capabilities.
+*   **`Task`:** Represents a unit of work (contains `id`, `sessionId`, `status`, `artifacts`, `history`, `metadata`).
+*   **`TaskStatus`:** Contains `state`, `message`, `timestamp`.
+*   **`TaskState` (Enum):** `submitted`, `working`, `input-required`, `completed`, `canceled`, `failed`, `unknown`.
+*   **`Message`:** Communication unit (contains `role`, `parts`, `metadata`).
+*   **`Part` (Union Type):** Content piece (`TextPart`, `FilePart`, `DataPart`).
+*   **`FileContent`:** File data (`name`, `mimeType`, `bytes` or `uri`).
+*   **`Artifact`:** Task output (contains `name`, `description`, `parts`, `index`, `append`, `lastChunk`, `metadata`).
+*   **`PushNotificationConfig`:** Configuration for push notifications.
+    *   *Note:* Part of the spec but **not implemented** in the current stdio examples.
+
+### 2.3. A2A RPC Methods
+
+*   **`tasks/send`:** Sends a message to initiate/continue a task (Request/Response).
+*   **`tasks/sendSubscribe`:** Sends a message and subscribes to real-time updates (Request/Stream).
+    *   *Stdio Note:* Stream consists of newline-delimited JSON `TaskStatusUpdateEvent` or `TaskArtifactUpdateEvent` objects sent over the agent process's stdout.
+*   **`tasks/get`:** Retrieves the current state of a task (Request/Response).
+*   **`tasks/cancel`:** Requests cancellation of a running task (Request/Response).
+*   **`tasks/pushNotification/set`:** Sets push notification config (Request/Response).
+    *   *Note:* Part of the spec but **not implemented** in the current stdio examples.
+*   **`tasks/pushNotification/get`:** Gets push notification config (Request/Response).
+    *   *Note:* Part of the spec but **not implemented** in the current stdio examples.
+*   **`tasks/resubscribe`:** Resubscribes to task updates after interruption (Request/Stream).
+    *   *Stdio Note:* Similar to `tasks/sendSubscribe` for stdio streaming.
+
+### 2.4. Streaming Update Events (Result of `tasks/sendSubscribe` or `tasks/resubscribe`)
+
+*   **`TaskStatusUpdateEvent`:** Signals a change in task status (`id`, `status`, `final`, `metadata`).
+*   **`TaskArtifactUpdateEvent`:** Signals a new or updated artifact (`id`, `artifact`, `final`, `metadata`).
+
+### 2.5. Standard Error Codes
+
+*   `-32700`: `JSONParseError`
+*   `-32600`: `InvalidRequestError`
+*   `-32601`: `MethodNotFoundError`
+*   `-32602`: `InvalidParamsError`
+*   `-32603`: `InternalError`
+
+### 2.6. A2A Specific Error Codes
+
+*   `-32001`: `TaskNotFoundError`
+*   `-32002`: `TaskNotCancelableError`
+*   `-32003`: `PushNotificationNotSupportedError`
+*   `-32004`: `UnsupportedOperationError`
+*   `-32005`: `ContentTypeNotSupportedError`
+
+## 3. Core Concepts (As Applied Here)
+
+*   **Agent Discovery:** For HTTP transport, clients typically find agents via `AgentCard` JSON. For **stdio transport**, the client must know the specific command required to execute the agent process.
+*   **Task Lifecycle:** Tasks progress through states defined in `TaskState`.
+*   **Communication:** Uses `Message` objects containing `Part`s. Task outputs are `Artifact`s.
+*   **Streaming:** Long-running tasks provide real-time updates:
+    *   **HTTP:** Via Server-Sent Events (SSE).
+    *   **Stdio:** Via newline-delimited JSON events (`TaskStatusUpdateEvent`, `TaskArtifactUpdateEvent`) written to the agent's stdout.
+*   **Push Notifications:** Specified by A2A but **not implemented** in this repository's examples.
+*   **Authentication:** Primarily relevant for HTTP transport. Stdio communication relies on the security context of the process execution environment.
+*   **Forms:** Structured data via `DataPart` is part of the spec but not explicitly demonstrated in the current agents.
+
+## 4. Implementations in this Repository
+
+### 4.1. JavaScript/TypeScript Libraries (`src/`)
+
+*   **Location:** `src/`
+*   **Client:**
+    *   `client/client.ts`: HTTP Client (conceptual).
+    *   `client/stdio_client.ts`: Client for stdio communication.
+    *   `client/stdio_transport.ts`: Manages stdio process communication.
+*   **Server:**
+    *   `server/server.ts`: HTTP Server (conceptual).
+    *   `server/stdio_server.ts`: Server for stdio communication.
+*   **Common:**
+    *   `server/store.ts`: Task storage interfaces/implementations.
+    *   `server/handler.ts`: Defines the `TaskHandler` interface for agent logic.
+    *   `server/error.ts`, `server/utils.ts`: Helpers.
+    *   `schema.ts`: TypeScript interfaces for A2A objects.
+
+### 4.2. JavaScript/TypeScript Samples
+
+*   **Location:** `src/`
+*   **Setup:** Uses `npm`, `tsx`, `tsconfig.json`. Requires Node.js >= 18. API keys via environment variables. Framework: **Genkit**.
+*   **Agents (`src/agents/`)**:
+    *   **Movie Agent (`movie-agent`)**: Uses TMDB API via Genkit tools.
+    *   **Coder Agent (`coder`)**: Generates code files as artifacts.
+*   **Hosts:**
+    *   **Stdio CLI (`src/stdio-cli.ts`)**: Command-line client for interacting with agents via the stdio transport.
+
+## 5. Development & Setup
+
+*   **Prerequisites:** Node.js (>=18), `npm`.
+*   **API Keys:** Required for agent functionality (e.g., `GEMINI_API_KEY`), typically set via environment variables.
+*   **Running Samples:** Use the stdio CLI to run agents locally. Example:
+    ```bash
+    export GEMINI_API_KEY=<your_api_key>
+    npm run a2a:stdio-cli -- npx tsx src/agents/movie-agent/index.ts --transport=stdio
+    ```
+    (The `a2a:stdio-cli` script in `package.json` runs `src/stdio-cli.ts`. The arguments after `--` specify the command for the CLI to execute the agent.)
+
+## 6. Contribution
+
+*   See `CONTRIBUTING.md` (if present, otherwise standard GitHub practices).
+*   Github issues for bugs and feature requests.

@@ -5,11 +5,11 @@
  Modifications were made using [Roo Code](https://github.com/RooVetGit/Roo-Code) and [Gemini 2.5 Pro](https://ai.google.dev) via vibe coding.
  ![roo vibecode](roo-vibecode.png)
 
- These examples are not intended for production use and have not been thoroughly vetted. They are provided as a learning resource and demonstration of how to run local Agents via `StdioTransport`, similar to how the MCP (Model Context Protocol) architecture operates.
+ These examples are not intended for production use and have not been thoroughly vetted. They demonstrate the A2A protocol using both a standard HTTP client/server model (implied, see `src/client` and `src/server`) and a local process communication mechanism via `StdioTransport` (see `src/client/stdio_client.ts` and `src/server/stdio_server.ts`). This allows running agents as child processes, similar to how the MCP (Model Context Protocol) architecture can operate locally.
 
 ---
 # JavaScript Samples
-The provided samples are built using [Genkit](https://genkit.dev/) and the Gemini API.
+The provided samples are built using [Genkit](https://genkit.dev/) and the Gemini API. See the [Server README](src/server/README.md) and [Client README](src/client/README.md) for details on the A2A implementations.
 
 ## Agents
 
